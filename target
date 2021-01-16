@@ -1,0 +1,159 @@
+/** Dark Forest targeter plugin
+ *  Author: Nick Johnson (@nicksdjohnson)
+ *  Licensed under MIT.
+ *
+ *  Usage: Open plugin, select a planet, and click "calculate forces".
+ *  A list of planets that can attack the target planet are shown.
+ *  Energy amounts shown are the amount the target planet's energy will be diminished.
+ *  Adjust the sliders to select the amount to send from each.
+ *  Click 'Attack' to send; sends are synchronised so they all arrive simultaneously.
+ *  Clicking 'Cancel' cancels any not-yet-sent sends for the current attack.
+ *
+ *  Known bugs:
+ *   - If your dark forest window is not in the foreground, scheduled sends will not be sent on time.
+ *     This is due to a limitation with setTimeout in background windows.
+ *   - Closing the plugin does not stop any attacks underway. Once closed only reloading
+ *     the page will cancel any scheduled sends.
+ *   - If you start more than one attack, only the most recent one can be cancelled.
+ *   - Does not correctly calculate the energy for sends to friendly planets.
+ *   - Does not account for energy regenerated on sending or target planets between clicking 'attack'
+ *     and the send happening or arriving.
+ *   - Unconfirmed or in-transit sends are not accounted for.
+ *
+ * Use at your own risk!
+ */
+function tableRow(cells) {
+    const tr = document.createElement('tr');
+    for(const cell of cells) {
+        const td = document.createElement('td');
+        td.appendChild(cell);
+        tr.appendChild(td);
+    }
+    return tr;
+}
+
+function planetName(planet) {
+    return planet.locationId.substring(4, 9) + ' (' + planet.planetLevel + ', ' + planet.upgradeState.reduce((a,b)=>a+b) + ')';
+}
+
+function scheduleMove(source, dest, energy, silver, delay) {
+    return window.setTimeout(() => {
+        console.log({source, dest, energy, silver});
+        df.move(source, dest, energy, silver);
+    }, delay);
+}
+
+class Targeter {
+  planetList;
+  planetData;
+  totalCell;
+  target;
+
+  renderValues = () => {
+      let total = 0;
+      for(const entry of this.planetData) {
+          const {planet, percentElement, arrivingElement, efficiencyElement} = entry;
+          const sending = planet.energy * (parseInt(percentElement.value) / 100);
+          const arriving = Math.floor(df.getEnergyArrivingForMove(planet.locationId, this.target.locationId, sending) / (this.target.defense / 100));
+          entry.arriving = arriving;
+          arrivingElement.innerText = arriving + ' (' + Math.floor((arriving / this.target.energy) * 100) + '%)';
+          efficiencyElement.innerText = Math.floor((arriving / sending) * 100) + '%';
+          total += arriving;
+      }
+      this.totalCell.innerText = total + ' (' + Math.floor((total / this.target.energy) * 100) + '%)';
+  }
+
+  attack = () => {
+      const maxTime = Math.max(...this.planetData.filter((p) => p.arriving > 0).map((p) => p.travelTime));
+      for(const entry of this.planetData) {
+        const {planet, arriving, travelTime} = entry;
+        if(arriving > 0) {
+            const sending = Math.floor(df.getEnergyNeededForMove(planet.locationId, this.target.locationId, arriving * (this.target.defense / 100)));
+            entry.timeoutId = scheduleMove(planet.locationId, this.target.locationId, sending, 0, (maxTime - travelTime) * 1000);
+        }
+      }
+  }
+
+  cancel = () => {
+      for(const {timeoutId} of this.planetData) {
+          if(timeoutId !== undefined) {
+              window.clearTimeout(timeoutId);
+          }
+      }
+  }
+
+  renderPlanets = () => {
+    this.planetData = [];
+    this.planetList.innerHTML = '<thead><tr><td>Planet</td><td>Percent</td><td>Energy</td><td>Efficiency</td><td>Time</td></tr></thead>';
+
+    this.target = ui.getSelectedPlanet();
+    for (const planet of df.getMyPlanets()) {
+      const coords = planet.location.coords;
+      if(Math.floor(df.getEnergyNeededForMove(planet.locationId, this.target.locationId, this.target.defense / 100)) <= planet.energy) {
+        const nameElement = document.createElement('a');
+        nameElement.setAttribute('href', 'javascript:ui.centerCoords({x:' + coords.x + ', y:' + coords.y + '})');
+        nameElement.innerText = planetName(planet);
+        const percentElement = document.createElement('input');
+        percentElement.setAttribute('type', 'range');
+        percentElement.setAttribute('min', 0);
+        percentElement.setAttribute('max', 100);
+        percentElement.setAttribute('value', 70);
+        percentElement.addEventListener('change', this.renderValues);
+        const arrivingElement = document.createElement('span');
+        const efficiencyElement = document.createElement('span');
+        const timeElement = document.createElement('span');
+        const travelTime = df.getTimeForMove(planet.locationId, this.target.locationId);
+        timeElement.innerText = Math.floor(travelTime);
+        this.planetData.push({planet, nameElement, percentElement, arrivingElement, efficiencyElement, travelTime, timeElement});
+      }
+    }
+
+    for (const {nameElement, percentElement, arrivingElement, efficiencyElement, timeElement} of this.planetData.sort((a, b) => a.travelTime - b.travelTime)) {
+        this.planetList.appendChild(tableRow([
+            nameElement,
+            percentElement,
+            arrivingElement,
+            efficiencyElement,
+            timeElement
+        ]));
+    }
+
+    this.totalCell = document.createElement('td');
+    const totalEntry = document.createElement('tr');
+    const attackButton = document.createElement('button');
+    attackButton.innerText = 'Attack!';
+    attackButton.addEventListener('click', this.attack);
+    totalEntry.appendChild(attackButton);
+    const cancelButton = document.createElement('button');
+    cancelButton.innerText = 'Cancel';
+    cancelButton.addEventListener('click', this.cancel);
+    totalEntry.appendChild(cancelButton);
+    totalEntry.appendChild(document.createElement('td'));
+    totalEntry.appendChild(this.totalCell);
+    totalEntry.appendChild(document.createElement('td'));
+    this.planetList.appendChild(totalEntry);
+
+    this.renderValues();
+  };
+
+  async render(container) {
+    const computeTotalsButton = document.createElement('button');
+    computeTotalsButton.innerText = 'calculate forces';
+    container.appendChild(computeTotalsButton);
+    container.appendChild(document.createElement('br'));
+    container.appendChild(document.createElement('br'));
+    computeTotalsButton.addEventListener('click', this.renderPlanets);
+    this.planetList = document.createElement('table');
+    container.appendChild(this.planetList);
+
+    this.planetList.style.maxHeight = '300px';
+    this.planetList.style.width = '500px';
+    this.planetList.style.overflowY = 'scroll';
+    container.style.width = '500px';
+  }
+}
+
+/**
+ * And don't forget to register it!
+ */
+plugin.register(new Targeter());
